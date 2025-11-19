@@ -22,6 +22,14 @@ from helpers import (
     save_memory,
     load_prompts,
     save_prompts,
+    load_cv_skeleton,
+    save_cv_skeleton,
+    load_latex_memory,
+    save_latex_memory,
+    get_latex_job_memory,
+    load_editable_latex,
+    save_editable_latex,
+    call_latex_cv_model,
 )
 
 # For reading additional uploaded .docx files
@@ -232,8 +240,8 @@ if min_user_score is not None:
 st.markdown(f"**Showing {len(filtered)} of {len(df)} jobs**")
 
 # Tabs: add Custom cover letter as its own tab
-overview_tab, detail_tab, cover_tab, chat_tab, note_tab = st.tabs(
-    ["Overview", "Detailed Job Profile", "Cover Letter", "Chat Assistant", "User note"]
+overview_tab, detail_tab, cover_tab, chat_tab, cv_creator_tab, note_tab = st.tabs(
+    ["Overview", "Detailed Job Profile", "Cover Letter", "Chat Assistant", "CV Creator", "User note"]
 )
 
 #region OVERVIEW TAB
@@ -931,6 +939,249 @@ with chat_tab:
                         save_prompts(prompts_for_mgr)
                         st.success(f"Added new prompt: {new_prompt_name}")
                         st.rerun()
+
+#region CV CREATOR TAB
+# ----------------- CV CREATOR TAB -----------------
+
+with cv_creator_tab:
+    st.subheader("LaTeX CV Creator")
+
+    selected_idx: Optional[int] = st.session_state.get("selected_job_idx")
+
+    if selected_idx is None or not (0 <= selected_idx < len(jobs)):
+        st.info("Please select a job in the Overview tab first.")
+    else:
+        job = jobs[selected_idx]
+        job_url = job.get("url") or f"job-{selected_idx}"
+
+        if OpenAI is None:
+            st.warning(
+                "The OpenAI Python client is not installed. "
+                "Install it in your environment with `pip install openai>=1.0` to enable the CV Creator."
+            )
+        else:
+            # --- CV Skeleton Management ---
+            cv_skeleton = load_cv_skeleton()
+
+            with st.expander("CV Skeleton Template", expanded=False):
+                st.markdown(
+                    "Upload or edit the LaTeX CV skeleton template. "
+                    "This template will be used as the base structure for all generated CVs."
+                )
+                skeleton_text = st.text_area(
+                    "LaTeX CV Skeleton",
+                    value=cv_skeleton,
+                    height=300,
+                    key="cv_skeleton_editor",
+                    help="Paste your LaTeX CV template here. The model will use this structure and fill it with your information.",
+                )
+
+                col_skel1, col_skel2 = st.columns(2)
+                with col_skel1:
+                    if st.button("Save CV Skeleton", key="save_skeleton"):
+                        save_cv_skeleton(skeleton_text)
+                        st.success("CV skeleton saved successfully!")
+                with col_skel2:
+                    uploaded_skeleton = st.file_uploader(
+                        "Or upload .tex file",
+                        type=["tex"],
+                        key="upload_skeleton",
+                        help="Upload a .tex file to use as CV skeleton",
+                    )
+                    if uploaded_skeleton is not None:
+                        skeleton_content = uploaded_skeleton.read().decode("utf-8")
+                        save_cv_skeleton(skeleton_content)
+                        st.success(f"Uploaded and saved skeleton from {uploaded_skeleton.name}")
+                        st.rerun()
+
+            st.markdown("---")
+
+            # --- Language Selection ---
+            col_lang, col_space = st.columns([1, 3])
+            with col_lang:
+                language = st.selectbox(
+                    "CV Language",
+                    options=["English", "German"],
+                    key=f"cv_language::{job_url}",
+                    help="The language in which the CV content should be written",
+                )
+
+            # --- Default Prompt (expandable, editable but not persistent) ---
+            default_prompt_key = f"cv_default_prompt::{job_url}"
+            if default_prompt_key not in st.session_state:
+                st.session_state[default_prompt_key] = (
+                    "Generate a professional, one-page LaTeX CV tailored to this job profile. "
+                    "Use the provided CV skeleton structure and fill it with my most relevant "
+                    "experience, skills, and qualifications that match this specific job. "
+                    "Ensure the CV is concise, well-formatted, and highlights my strengths "
+                    "for this position. Follow professional CV best practices."
+                )
+
+            with st.expander("Default Prompt (click to edit)", expanded=False):
+                st.markdown(
+                    "This is the base instruction given to the model. "
+                    "You can edit it for this session, but changes are not saved across app restarts."
+                )
+                default_prompt = st.text_area(
+                    "Default Prompt",
+                    value=st.session_state[default_prompt_key],
+                    height=150,
+                    key=default_prompt_key,
+                    help="Base instructions for CV generation (not persistent across restarts)",
+                )
+
+            # --- Custom Prompt Addition (always shown) ---
+            custom_prompt_key = f"cv_custom_prompt::{job_url}"
+            if custom_prompt_key not in st.session_state:
+                st.session_state[custom_prompt_key] = ""
+
+            st.markdown("### Custom Instructions")
+            custom_prompt = st.text_area(
+                "Additional instructions (optional)",
+                value=st.session_state[custom_prompt_key],
+                height=100,
+                key=custom_prompt_key,
+                placeholder="Add any specific instructions, e.g., 'emphasize my Python skills' or 'modify the education section to be more concise'",
+                help="Add custom instructions to refine the CV generation",
+            )
+
+            # --- Generate Button & Clear Memory ---
+            col_gen1, col_gen2 = st.columns([1, 1])
+            with col_gen1:
+                generate_clicked = st.button(
+                    "Generate LaTeX CV",
+                    key=f"generate_cv::{job_url}",
+                    type="primary",
+                    help="Generate a tailored LaTeX CV for this job",
+                )
+            with col_gen2:
+                clear_latex_mem = st.button(
+                    "Clear CV memory",
+                    key=f"clear_latex_mem::{job_url}",
+                    help="Deletes all saved conversation history for CV generation",
+                )
+
+            if clear_latex_mem:
+                memory = load_latex_memory()
+                if job_url in memory:
+                    del memory[job_url]
+                save_latex_memory(memory)
+                st.success("Cleared CV generation memory for this job.")
+
+            # --- Model Output Box ---
+            latest_output_key = f"cv_latest_output::{job_url}"
+
+            if generate_clicked:
+                # Load editable LaTeX to pass as context
+                editable_dict = load_editable_latex()
+                editable_latex = editable_dict.get(job_url, "")
+
+                with st.spinner("Generating LaTeX CV..."):
+                    latex_output = call_latex_cv_model(
+                        job=job,
+                        cv_skeleton=cv_skeleton,
+                        user_prompt_addition=custom_prompt,
+                        default_prompt=default_prompt,
+                        language=language,
+                        url=job_url,
+                        editable_latex=editable_latex,
+                    )
+                st.session_state[latest_output_key] = latex_output
+
+            latest_output = st.session_state.get(latest_output_key, "")
+
+            if latest_output:
+                st.markdown("### Generated LaTeX Code")
+                st.markdown(
+                    '<div style="background-color: rgba(240, 242, 246, 0.5); '
+                    'border: 1px solid rgba(0,0,0,0.1); border-radius: 8px; '
+                    'padding: 1rem; margin-bottom: 1rem;">',
+                    unsafe_allow_html=True,
+                )
+                st.code(latest_output, language="latex", line_numbers=True)
+                st.markdown("</div>", unsafe_allow_html=True)
+
+                # Copy to editable button
+                if st.button(
+                    "📋 Copy to Editable LaTeX Box",
+                    key=f"copy_to_editable::{job_url}",
+                    help="Copy the generated LaTeX to the editable box below",
+                ):
+                    editable_dict = load_editable_latex()
+                    editable_dict[job_url] = latest_output
+                    save_editable_latex(editable_dict)
+                    st.success("Copied to editable LaTeX box!")
+                    st.rerun()
+
+            st.markdown("---")
+
+            # --- Editable LaTeX Box (persistent) ---
+            st.markdown("### Editable LaTeX Code")
+            st.markdown(
+                "This LaTeX code is saved persistently. "
+                "You can edit it manually or paste your own code. "
+                "The model can see this code when you reference it in custom instructions."
+            )
+
+            editable_dict = load_editable_latex()
+            editable_latex = editable_dict.get(job_url, "")
+
+            editable_key = f"cv_editable_latex::{job_url}"
+            if editable_key not in st.session_state:
+                st.session_state[editable_key] = editable_latex
+
+            with st.form(f"editable_latex_form::{job_url}"):
+                edited_latex = st.text_area(
+                    "Editable LaTeX",
+                    value=st.session_state[editable_key],
+                    height=400,
+                    key=editable_key,
+                    help="Edit your LaTeX code here. Changes are saved when you click 'Save Editable LaTeX'.",
+                )
+
+                col_save1, col_save2 = st.columns([1, 3])
+                with col_save1:
+                    save_editable = st.form_submit_button("Save Editable LaTeX")
+
+                if save_editable:
+                    editable_dict[job_url] = st.session_state[editable_key]
+                    save_editable_latex(editable_dict)
+                    st.success("Editable LaTeX saved!")
+
+            st.markdown("---")
+
+            # --- Conversation Memory ---
+            with st.expander("CV Generation Memory (last 10 prompts)", expanded=False):
+                latex_memory = load_latex_memory()
+                job_latex_memory = latex_memory.get(job_url, {})
+                messages = job_latex_memory.get("messages", [])
+
+                if not messages:
+                    st.write("No memory stored yet for this job's CV generation.")
+                else:
+                    for i, msg in enumerate(messages, start=1):
+                        role = msg.get("role", "")
+                        content = msg.get("content", "")
+                        if not content:
+                            continue
+                        # Truncate long LaTeX output in memory display
+                        display_content = content
+                        if len(display_content) > 500:
+                            display_content = display_content[:500] + "... [truncated]"
+
+                        safe_content = str(display_content).replace("\n", "<br>")
+                        if role == "user":
+                            st.markdown(
+                                f'<div><span style="color:#2563eb; font-weight:600;">PROMPT ({i})</span>: '
+                                f'{safe_content}</div>',
+                                unsafe_allow_html=True,
+                            )
+                        elif role == "assistant":
+                            st.markdown(
+                                f'<div><span style="color:#16a34a; font-weight:600;">GENERATED ({i})</span>: '
+                                f'{safe_content}</div>',
+                                unsafe_allow_html=True,
+                            )
 
 #region USER NOTE TAB
 # ----------------- USER NOTE TAB -----------------
