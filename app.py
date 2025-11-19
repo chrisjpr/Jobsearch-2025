@@ -1167,19 +1167,6 @@ with cv_creator_tab:
                     save_editable_latex(editable_dict)
                     st.success("Editable LaTeX saved!")
 
-            # Copy area (read-only text area for easy copying)
-            if st.session_state[editable_key]:
-                with st.expander("📋 Copy LaTeX Code", expanded=False):
-                    st.markdown("**Select all (Ctrl+A / Cmd+A) and copy (Ctrl+C / Cmd+C):**")
-                    st.text_area(
-                        "Copy LaTeX",
-                        value=st.session_state[editable_key],
-                        height=300,
-                        key=f"copy_editable::{job_url}",
-                        disabled=False,
-                        label_visibility="collapsed"
-                    )
-
             st.markdown("---")
 
             # --- Conversation Memory ---
