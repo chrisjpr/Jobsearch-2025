@@ -40,8 +40,15 @@ PROMPTS_PATH = DATA_DIR / "prompts.json"
 # CV directory – adapt if needed
 CV_DIR = Path("/local_scrapers/local_data/chris_judkins")
 
+# CV Creator paths
+CV_SKELETON_PATH = DATA_DIR / "cv_skeleton.tex"
+CV_LATEX_MEMORY_PATH = DATA_DIR / "cv_latex_memory.json"
+CV_EDITABLE_LATEX_PATH = DATA_DIR / "cv_editable_latex.json"
+
 MEMORY_WINDOW = 10
 DEFAULT_OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+# Use a more capable model for LaTeX CV generation
+CV_LATEX_MODEL = os.environ.get("CV_LATEX_MODEL", "gpt-4o")
 
 # ----------------- HTML template loading -----------------
 
@@ -527,5 +534,224 @@ def call_chat_model(
     memory = load_memory()
     memory[url] = memory_entry
     save_memory(memory)
+
+    return answer
+
+
+# ----------------- CV Creator helpers -----------------
+
+
+def load_cv_skeleton(path: Path = CV_SKELETON_PATH) -> str:
+    """
+    Load the LaTeX CV skeleton template from disk.
+    Returns empty string if not found.
+    """
+    path = Path(path)
+    if not path.exists():
+        return ""
+    try:
+        return path.read_text(encoding="utf-8")
+    except Exception:
+        return ""
+
+
+def save_cv_skeleton(skeleton: str, path: Path = CV_SKELETON_PATH) -> None:
+    """Save the LaTeX CV skeleton template to disk."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(skeleton, encoding="utf-8")
+
+
+def load_latex_memory(path: Path = CV_LATEX_MEMORY_PATH) -> Dict[str, Any]:
+    """
+    Load per-job LaTeX CV chat memory from disk.
+    Structure: { url: {"messages": [ {role, content}, ... ] } }
+    """
+    path = Path(path)
+    if not path.exists():
+        return {}
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+        if not text:
+            return {}
+        memory = json.loads(text)
+        # Ensure proper structure
+        for url, entry in list(memory.items()):
+            msgs = entry.get("messages", [])
+            if not isinstance(msgs, list):
+                memory[url] = {"messages": []}
+        return memory
+    except Exception:
+        return {}
+
+
+def save_latex_memory(memory: Dict[str, Any], path: Path = CV_LATEX_MEMORY_PATH) -> None:
+    """Save LaTeX CV chat memory to disk."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(memory, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def get_latex_job_memory(url: str) -> Dict[str, Any]:
+    """Get or create LaTeX memory entry for a specific job."""
+    memory = load_latex_memory()
+    if url not in memory:
+        memory[url] = {"messages": []}
+    return memory[url]
+
+
+def load_editable_latex(path: Path = CV_EDITABLE_LATEX_PATH) -> Dict[str, str]:
+    """
+    Load per-job editable LaTeX content from disk.
+    Structure: { url: "latex_content" }
+    """
+    path = Path(path)
+    if not path.exists():
+        return {}
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+        if not text:
+            return {}
+        return json.loads(text)
+    except Exception:
+        return {}
+
+
+def save_editable_latex(latex_dict: Dict[str, str], path: Path = CV_EDITABLE_LATEX_PATH) -> None:
+    """Save per-job editable LaTeX content to disk."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(latex_dict, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def call_latex_cv_model(
+    job: Dict[str, Any],
+    cv_skeleton: str,
+    user_prompt_addition: str,
+    default_prompt: str,
+    language: str,
+    url: str,
+    editable_latex: str,
+) -> str:
+    """
+    Call OpenAI chat completion for LaTeX CV generation with:
+    - CV skeleton template
+    - Job context
+    - User CV texts
+    - Language preference (German/English)
+    - Default prompt (rules for CV generation)
+    - User prompt addition (custom instructions)
+    - Current editable LaTeX content (so model can reference it)
+    - Short per-job memory (last 10 turns)
+
+    Returns LaTeX code only (enforced via system prompt).
+    """
+    if OpenAI is None:
+        return (
+            "% ERROR: OpenAI Python client not installed. Install `openai>=1.0`."
+        )
+
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        return (
+            "% ERROR: Environment variable OPENAI_API_KEY is not set."
+        )
+
+    client = OpenAI(api_key=api_key)
+
+    cv_text = load_cv_corpus()
+    job_context = build_job_context(job, "")  # No cover letter needed for CV
+
+    # Build the full prompt from default + user addition
+    full_user_prompt = default_prompt
+    if user_prompt_addition.strip():
+        full_user_prompt += "\n\nAdditional instructions:\n" + user_prompt_addition
+
+    # System prompt enforcing LaTeX-only output
+    system_content = (
+        f"You are an expert LaTeX CV generator. Your task is to create a professional, "
+        f"one-page CV in LaTeX based on the provided CV skeleton template.\n\n"
+        f"CRITICAL REQUIREMENTS:\n"
+        f"1. Output ONLY valid LaTeX code - no explanations, no comments, no markdown.\n"
+        f"2. The CV MUST be exactly 1 page when compiled.\n"
+        f"3. Use the CV skeleton structure provided - only modify contents, not the overall structure.\n"
+        f"4. You MAY add matching bullet points or adjust formatting to fit content.\n"
+        f"5. Follow professional CV best practices.\n"
+        f"6. Select and emphasize personal information, experience, and skills from the user's CV "
+        f"that BEST match the job profile.\n"
+        f"7. Write the entire CV in {language} language.\n"
+        f"8. Focus on relevance to the job - tailor the content to highlight the most matching qualifications.\n\n"
+        f"IMPORTANT: You can see the current editable LaTeX code. If the user asks you to modify it, "
+        f"reference that code and make the requested changes while maintaining the structure.\n\n"
+        f"OUTPUT FORMAT: Return ONLY the complete LaTeX code, nothing else."
+    )
+
+    memory_entry = get_latex_job_memory(url)
+    truncate_memory(memory_entry, MEMORY_WINDOW)
+
+    messages: List[Dict[str, str]] = [
+        {"role": "system", "content": system_content},
+        {
+            "role": "system",
+            "content": (
+                "CV Skeleton Template (use this structure):\n\n"
+                + (cv_skeleton or "(No CV skeleton provided.)")
+                + "\n\n---\n\n"
+                + "Job Profile to tailor CV for:\n\n"
+                + job_context
+                + "\n\n---\n\n"
+                + "User's CV and personal information:\n\n"
+                + (cv_text or "(No CV documents loaded.)")
+            ),
+        },
+    ]
+
+    # Add current editable LaTeX as context
+    if editable_latex.strip():
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "Current editable LaTeX code (user can reference this):\n\n"
+                    + editable_latex
+                ),
+            }
+        )
+
+    # Memory of previous turns
+    for msg in memory_entry.get("messages", []):
+        if msg.get("role") in ("user", "assistant") and msg.get("content"):
+            messages.append({"role": msg["role"], "content": msg["content"]})
+
+    # Add current user prompt
+    messages.append({"role": "user", "content": full_user_prompt})
+
+    completion = client.chat.completions.create(
+        model=CV_LATEX_MODEL,
+        messages=messages,
+        temperature=0.3,  # Lower temperature for more consistent LaTeX output
+    )
+
+    answer = completion.choices[0].message.content.strip()
+
+    # Clean up any markdown code fences if present (```latex ... ```)
+    if answer.startswith("```"):
+        lines = answer.split("\n")
+        # Remove first line if it's a code fence
+        if lines[0].strip().startswith("```"):
+            lines = lines[1:]
+        # Remove last line if it's a code fence
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        answer = "\n".join(lines)
+
+    # Update memory with final user+assistant turn
+    memory_entry["messages"].append({"role": "user", "content": full_user_prompt})
+    memory_entry["messages"].append({"role": "assistant", "content": answer})
+    truncate_memory(memory_entry, MEMORY_WINDOW)
+
+    memory = load_latex_memory()
+    memory[url] = memory_entry
+    save_latex_memory(memory)
 
     return answer
