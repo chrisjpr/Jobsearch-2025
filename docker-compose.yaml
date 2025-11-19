@@ -1,0 +1,16 @@
+version: "3.8"
+
+services:
+  job_browser:
+    build:
+      context: .
+    container_name: job_browser
+    env_file:
+      - env
+    volumes:
+      # Mount the SAME host folder that n8n uses
+      - "F:/SynologyDrive/IT Projekte/Apps/n8n_jobsearch/local_scrapers:/local_scrapers"
+      - ./data:/data
+    ports:
+      - "8501:8501"
+    restart: unless-stopped
