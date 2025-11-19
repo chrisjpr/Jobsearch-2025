@@ -715,6 +715,7 @@ def call_latex_cv_model(
         f"- If .cls files are provided, they define the document class and must be referenced correctly\n"
         f"- Maintain exact command names and environments from the skeleton\n"
         f"- Keep the same formatting style throughout\n\n"
+        f"- Ensure that the document starts with '\begin{{filecontents*}}{{page1sidebar.tex}}' if present in the skeleton\n\n"
         f"💡 EDITING EXISTING CVs:\n"
         f"If you see 'Current editable LaTeX code', the user may ask you to modify it. "
         f"When editing, maintain the EXACT structure and only change the content as requested.\n\n"
