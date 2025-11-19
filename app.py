@@ -311,49 +311,55 @@ with overview_tab:
     if selected_idx is not None and selected_idx in filtered.index:
         table_df.loc[table_df["__orig_idx"] == selected_idx, "selected"] = True
 
+    # Store original values for comparison
+    if "jobs_table_original" not in st.session_state:
+        st.session_state["jobs_table_original"] = table_df.copy()
+
     # Editable table (user_score + checkboxes + selection)
     edited_df = st.data_editor(
         table_df,
         use_container_width=True,
         hide_index=True,
         key="jobs_table",
+        disabled=["__orig_idx"],  # Only disable index column
         column_order=["selected"] + display_cols + ["__orig_idx"],
         column_config={
             "selected": st.column_config.CheckboxColumn(
-                "selected",
-                help="Tick the row that should be the current selection.",
+                "Select",
+                help="Click to select this job (only one at a time).",
                 default=False,
             ),
             "user_score": st.column_config.NumberColumn(
-                "user_score",
+                "User Score",
                 help="Your personal rating for this job (e.g., 0–10).",
                 step=0.1,
             ),
             "overwritten": st.column_config.CheckboxColumn(
-                "overwritten",
+                "Modified",
                 help="Mark jobs where you manually adjusted the cover letter or scoring.",
                 default=False,
             ),
             "application_sent": st.column_config.CheckboxColumn(
-                "application_sent",
+                "Applied",
                 help="Tick if you already submitted an application for this job.",
                 default=False,
             ),
             "__orig_idx": st.column_config.NumberColumn(
                 "__orig_idx",
-                help="Internal index (hidden).",
+                help="Internal index",
                 disabled=True,
                 width="small",
             ),
         },
     )
 
-    # Persist inline edits back to jobs JSON + update selection
+    # Process changes only if edited_df differs from original
     updated_any = False
     selected_job_indices: List[int] = []
+    prev_selected = st.session_state.get("selected_job_idx")
 
     if not edited_df.empty and "__orig_idx" in edited_df.columns:
-        for _, row in edited_df.iterrows():
+        for idx, row in edited_df.iterrows():
             try:
                 job_idx = int(row["__orig_idx"])
             except Exception:
@@ -363,25 +369,40 @@ with overview_tab:
 
             job = jobs[job_idx]
 
-            # user_score parsing
+            # Track which rows are selected
+            row_selected = bool(row.get("selected", False))
+            if row_selected:
+                selected_job_indices.append(job_idx)
+
+            # Parse user_score
             new_score_raw = row.get("user_score", None)
-            if pd.isna(new_score_raw):
+            if pd.isna(new_score_raw) or new_score_raw == "" or new_score_raw is None:
                 new_score_val: Optional[float] = None
             else:
                 try:
                     new_score_val = float(new_score_raw)
-                except Exception:
-                    new_score_val = None
+                except (ValueError, TypeError):
+                    new_score_val = job.get("user_score")  # Keep existing value if parse fails
 
             new_overwritten = bool(row.get("overwritten", False))
             new_app_sent = bool(row.get("application_sent", False))
 
-            # Track which rows are selected
-            if bool(row.get("selected", False)):
-                selected_job_indices.append(job_idx)
+            # Compare and update only if changed
+            old_score = job.get("user_score")
+            # Normalize for comparison (None == None, float == float)
+            score_changed = False
+            if old_score is None and new_score_val is not None:
+                score_changed = True
+            elif old_score is not None and new_score_val is None:
+                score_changed = True
+            elif old_score is not None and new_score_val is not None:
+                try:
+                    score_changed = abs(float(old_score) - float(new_score_val)) > 0.001
+                except (ValueError, TypeError):
+                    score_changed = True
 
             if (
-                job.get("user_score") != new_score_val
+                score_changed
                 or bool(job.get("overwritten", False)) != new_overwritten
                 or bool(job.get("application_sent", False)) != new_app_sent
             ):
@@ -390,26 +411,39 @@ with overview_tab:
                 job["application_sent"] = new_app_sent
                 updated_any = True
 
-    # Update JSON if anything changed
+    # Save if anything changed
     if updated_any:
         try:
             save_jobs(JSON_PATH, jobs)
+            # Don't show success message to avoid triggering rerun
         except Exception as e:
-            st.error(f"Failed to save inline changes: {e}")
+            st.error(f"Failed to save changes: {e}")
 
-    # Update current selection based on 'selected' checkboxes (only one, newest)
-    prev_selected = st.session_state.get("selected_job_idx")
-    if selected_job_indices:
-        new_selected = prev_selected
-        # Prefer a newly ticked index that differs from previous selection
+    # Handle selection changes - ensure only one selected at a time
+    if len(selected_job_indices) > 1:
+        # Multiple selections - keep only the most recent one (different from previous)
+        new_selection = None
         for idx in selected_job_indices:
             if idx != prev_selected:
-                new_selected = idx
+                new_selection = idx
                 break
-        st.session_state["selected_job_idx"] = new_selected
-    else:
-        # If nothing is selected, treat as "no selection"
-        st.session_state["selected_job_idx"] = None
+        if new_selection is None:
+            # All are the same as previous, just keep first
+            new_selection = selected_job_indices[0]
+        st.session_state["selected_job_idx"] = new_selection
+        st.rerun()  # Force rerun to update UI with single selection
+    elif len(selected_job_indices) == 1:
+        # Single selection
+        if selected_job_indices[0] != prev_selected:
+            st.session_state["selected_job_idx"] = selected_job_indices[0]
+            st.rerun()  # Rerun to update other tabs
+    elif len(selected_job_indices) == 0 and prev_selected is not None:
+        # Deselected current - keep it selected
+        # User must select another job to change selection
+        pass
+
+    # Update original state
+    st.session_state["jobs_table_original"] = edited_df.copy()
 
 # ----------------- DETAILED JOB PROFILE TAB -----------------
 
@@ -961,79 +995,15 @@ with cv_creator_tab:
                 "Install it in your environment with `pip install openai>=1.0` to enable the CV Creator."
             )
         else:
-            # --- CV Skeleton Management ---
+            # --- Load CV Skeleton and Class Files ---
             cv_skeleton = load_cv_skeleton()
             cls_files = load_cls_files()
 
             # Show warning if no skeleton is available
             if not cv_skeleton:
                 st.warning(
-                    "⚠️ No CV skeleton template found. Please upload or create one in the section below."
+                    "⚠️ No CV skeleton template found. Please create one in the 'CV Skeleton Template' section at the bottom of this page."
                 )
-
-            # Show info about available .cls files
-            if cls_files:
-                cls_names = ", ".join(cls_files.keys())
-                st.info(f"📄 LaTeX class files available: {cls_names}")
-
-            with st.expander("CV Skeleton Template & Class Files", expanded=False):
-                st.markdown(
-                    "**CV Skeleton Template:** Upload or edit the LaTeX CV skeleton template. "
-                    "This template will be used as the base structure for all generated CVs.\n\n"
-                    "**Class Files (.cls):** If your CV uses a custom LaTeX class (like altacv.cls), "
-                    "upload it here. The model will preserve the \\documentclass line and use the class correctly."
-                )
-
-                st.markdown("### CV Skeleton (.tex)")
-                skeleton_text = st.text_area(
-                    "LaTeX CV Skeleton",
-                    value=cv_skeleton,
-                    height=300,
-                    key="cv_skeleton_editor",
-                    help="Paste your LaTeX CV template here. Use placeholders in square brackets like [YOUR NAME], [Job Title], etc.",
-                )
-
-                col_skel1, col_skel2 = st.columns(2)
-                with col_skel1:
-                    if st.button("Save CV Skeleton", key="save_skeleton"):
-                        save_cv_skeleton(skeleton_text)
-                        st.success("CV skeleton saved successfully!")
-                with col_skel2:
-                    uploaded_skeleton = st.file_uploader(
-                        "Or upload .tex file",
-                        type=["tex"],
-                        key="upload_skeleton",
-                        help="Upload a .tex file to use as CV skeleton",
-                    )
-                    if uploaded_skeleton is not None:
-                        skeleton_content = uploaded_skeleton.read().decode("utf-8")
-                        save_cv_skeleton(skeleton_content)
-                        st.success(f"Uploaded and saved skeleton from {uploaded_skeleton.name}")
-                        st.rerun()
-
-                st.markdown("### LaTeX Class Files (.cls)")
-                st.markdown(
-                    "Upload custom LaTeX class files (e.g., altacv.cls) that your CV template requires. "
-                    "These files will be available in /data and the model will be aware of them."
-                )
-
-                uploaded_cls = st.file_uploader(
-                    "Upload .cls files",
-                    type=["cls"],
-                    accept_multiple_files=True,
-                    key="upload_cls",
-                    help="Upload LaTeX class files needed for your CV template",
-                )
-                if uploaded_cls:
-                    from pathlib import Path
-                    data_dir = Path("/data")
-                    for cls_file in uploaded_cls:
-                        cls_path = data_dir / cls_file.name
-                        cls_path.write_text(cls_file.read().decode("utf-8"), encoding="utf-8")
-                        st.success(f"Uploaded {cls_file.name} to /data")
-                    st.rerun()
-
-            st.markdown("---")
 
             # --- Language Selection ---
             col_lang, col_space = st.columns([1, 3])
@@ -1139,26 +1109,28 @@ with cv_creator_tab:
 
             if latest_output:
                 st.markdown("### Generated LaTeX Code")
-                st.markdown(
-                    '<div style="background-color: rgba(240, 242, 246, 0.5); '
-                    'border: 1px solid rgba(0,0,0,0.1); border-radius: 8px; '
-                    'padding: 1rem; margin-bottom: 1rem;">',
-                    unsafe_allow_html=True,
+                st.info(
+                    "💡 **Tip:** Use the copy button in the top-right corner of the code block below to copy to your clipboard, "
+                    "or click the button below to move this code to the editable box."
                 )
                 st.code(latest_output, language="latex", line_numbers=True)
-                st.markdown("</div>", unsafe_allow_html=True)
 
-                # Copy to editable button
-                if st.button(
-                    "📋 Copy to Editable LaTeX Box",
-                    key=f"copy_to_editable::{job_url}",
-                    help="Copy the generated LaTeX to the editable box below",
-                ):
-                    editable_dict = load_editable_latex()
-                    editable_dict[job_url] = latest_output
-                    save_editable_latex(editable_dict)
-                    st.success("Copied to editable LaTeX box!")
-                    st.rerun()
+                col_copy1, col_copy2 = st.columns([1, 3])
+                with col_copy1:
+                    # Copy to editable button
+                    if st.button(
+                        "📥 Move to Editable Box",
+                        key=f"copy_to_editable::{job_url}",
+                        help="Move the generated LaTeX to the editable box below (replaces current content)",
+                    ):
+                        editable_dict = load_editable_latex()
+                        editable_dict[job_url] = latest_output
+                        save_editable_latex(editable_dict)
+                        # Also update session state immediately
+                        editable_key = f"cv_editable_latex::{job_url}"
+                        st.session_state[editable_key] = latest_output
+                        st.success("✅ Moved to editable LaTeX box!")
+                        st.rerun()
 
             st.markdown("---")
 
@@ -1229,6 +1201,46 @@ with cv_creator_tab:
                                 f'{safe_content}</div>',
                                 unsafe_allow_html=True,
                             )
+
+            st.markdown("---")
+
+            # --- CV Skeleton Template (at the end) ---
+            with st.expander("CV Skeleton Template", expanded=False):
+                st.markdown(
+                    "**CV Skeleton Template:** Upload or edit the LaTeX CV skeleton template. "
+                    "This template will be used as the base structure for all generated CVs. "
+                    "Use placeholders in square brackets like `[YOUR NAME]`, `[Job Title]`, etc. "
+                    "The model will replace these with actual content from your CV.\n\n"
+                    "**Note:** If your CV uses a custom LaTeX class (like altacv.cls), place the .cls file "
+                    "in the `/data` directory. The model will automatically detect and use it."
+                )
+
+                skeleton_text = st.text_area(
+                    "LaTeX CV Skeleton",
+                    value=cv_skeleton,
+                    height=300,
+                    key="cv_skeleton_editor",
+                    help="Paste your LaTeX CV template here.",
+                )
+
+                col_skel1, col_skel2 = st.columns(2)
+                with col_skel1:
+                    if st.button("Save CV Skeleton", key="save_skeleton"):
+                        save_cv_skeleton(skeleton_text)
+                        st.success("✅ CV skeleton saved successfully!")
+                        st.rerun()
+                with col_skel2:
+                    uploaded_skeleton = st.file_uploader(
+                        "Or upload .tex file",
+                        type=["tex"],
+                        key="upload_skeleton",
+                        help="Upload a .tex file to use as CV skeleton",
+                    )
+                    if uploaded_skeleton is not None:
+                        skeleton_content = uploaded_skeleton.read().decode("utf-8")
+                        save_cv_skeleton(skeleton_content)
+                        st.success(f"✅ Uploaded and saved skeleton from {uploaded_skeleton.name}")
+                        st.rerun()
 
 #region USER NOTE TAB
 # ----------------- USER NOTE TAB -----------------
