@@ -1109,15 +1109,11 @@ with cv_creator_tab:
 
             if latest_output:
                 st.markdown("### Generated LaTeX Code")
-                st.info(
-                    "💡 **Tip:** Use the copy button in the top-right corner of the code block below to copy to your clipboard, "
-                    "or click the button below to move this code to the editable box."
-                )
-                st.code(latest_output, language="latex", line_numbers=True)
 
-                col_copy1, col_copy2 = st.columns([1, 3])
-                with col_copy1:
-                    # Copy to editable button
+                # Buttons outside the expander
+                col_btn1, col_btn2, col_btn3 = st.columns([1, 1, 2])
+                with col_btn1:
+                    # Move to editable button
                     if st.button(
                         "📥 Move to Editable Box",
                         key=f"copy_to_editable::{job_url}",
@@ -1131,6 +1127,21 @@ with cv_creator_tab:
                         st.session_state[editable_key] = latest_output
                         st.success("✅ Moved to editable LaTeX box!")
                         st.rerun()
+
+                # Collapsible output section
+                with st.expander("📄 View Generated Output", expanded=False):
+                    st.code(latest_output, language="latex", line_numbers=True)
+
+                    # Text area for easy copying
+                    st.markdown("**Copy from text area:**")
+                    st.text_area(
+                        "Copy LaTeX Code",
+                        value=latest_output,
+                        height=300,
+                        key=f"copy_area::{job_url}",
+                        help="Select all (Ctrl+A / Cmd+A) and copy (Ctrl+C / Cmd+C)",
+                        label_visibility="collapsed"
+                    )
 
             st.markdown("---")
 
