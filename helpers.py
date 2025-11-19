@@ -683,6 +683,8 @@ def call_latex_cv_model(
         f"8. Focus on relevance to the job - tailor the content to highlight the most matching qualifications.\n\n"
         f"IMPORTANT: You can see the current editable LaTeX code. If the user asks you to modify it, "
         f"reference that code and make the requested changes while maintaining the structure.\n\n"
+        f"IMPORTANT: The user has access to a altacv.cls file which helps render the document, \n\n"
+        f"ensure that you stay in the given boundaries which the altacv.cls is capable of processing.\n\n"
         f"OUTPUT FORMAT: Return ONLY the complete LaTeX code, nothing else."
     )
 
