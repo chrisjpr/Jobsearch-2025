@@ -1132,17 +1132,6 @@ with cv_creator_tab:
                 with st.expander("📄 View Generated Output", expanded=False):
                     st.code(latest_output, language="latex", line_numbers=True)
 
-                    # Text area for easy copying
-                    st.markdown("**Copy from text area:**")
-                    st.text_area(
-                        "Copy LaTeX Code",
-                        value=latest_output,
-                        height=300,
-                        key=f"copy_area::{job_url}",
-                        help="Select all (Ctrl+A / Cmd+A) and copy (Ctrl+C / Cmd+C)",
-                        label_visibility="collapsed"
-                    )
-
             st.markdown("---")
 
             # --- Editable LaTeX Box (persistent) ---
@@ -1177,6 +1166,19 @@ with cv_creator_tab:
                     editable_dict[job_url] = st.session_state[editable_key]
                     save_editable_latex(editable_dict)
                     st.success("Editable LaTeX saved!")
+
+            # Copy area (read-only text area for easy copying)
+            if st.session_state[editable_key]:
+                with st.expander("📋 Copy LaTeX Code", expanded=False):
+                    st.markdown("**Select all (Ctrl+A / Cmd+A) and copy (Ctrl+C / Cmd+C):**")
+                    st.text_area(
+                        "Copy LaTeX",
+                        value=st.session_state[editable_key],
+                        height=300,
+                        key=f"copy_editable::{job_url}",
+                        disabled=False,
+                        label_visibility="collapsed"
+                    )
 
             st.markdown("---")
 
