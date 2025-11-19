@@ -24,6 +24,7 @@ from helpers import (
     save_prompts,
     load_cv_skeleton,
     save_cv_skeleton,
+    load_cls_files,
     load_latex_memory,
     save_latex_memory,
     get_latex_job_memory,
@@ -962,18 +963,34 @@ with cv_creator_tab:
         else:
             # --- CV Skeleton Management ---
             cv_skeleton = load_cv_skeleton()
+            cls_files = load_cls_files()
 
-            with st.expander("CV Skeleton Template", expanded=False):
-                st.markdown(
-                    "Upload or edit the LaTeX CV skeleton template. "
-                    "This template will be used as the base structure for all generated CVs."
+            # Show warning if no skeleton is available
+            if not cv_skeleton:
+                st.warning(
+                    "⚠️ No CV skeleton template found. Please upload or create one in the section below."
                 )
+
+            # Show info about available .cls files
+            if cls_files:
+                cls_names = ", ".join(cls_files.keys())
+                st.info(f"📄 LaTeX class files available: {cls_names}")
+
+            with st.expander("CV Skeleton Template & Class Files", expanded=False):
+                st.markdown(
+                    "**CV Skeleton Template:** Upload or edit the LaTeX CV skeleton template. "
+                    "This template will be used as the base structure for all generated CVs.\n\n"
+                    "**Class Files (.cls):** If your CV uses a custom LaTeX class (like altacv.cls), "
+                    "upload it here. The model will preserve the \\documentclass line and use the class correctly."
+                )
+
+                st.markdown("### CV Skeleton (.tex)")
                 skeleton_text = st.text_area(
                     "LaTeX CV Skeleton",
                     value=cv_skeleton,
                     height=300,
                     key="cv_skeleton_editor",
-                    help="Paste your LaTeX CV template here. The model will use this structure and fill it with your information.",
+                    help="Paste your LaTeX CV template here. Use placeholders in square brackets like [YOUR NAME], [Job Title], etc.",
                 )
 
                 col_skel1, col_skel2 = st.columns(2)
@@ -994,6 +1011,28 @@ with cv_creator_tab:
                         st.success(f"Uploaded and saved skeleton from {uploaded_skeleton.name}")
                         st.rerun()
 
+                st.markdown("### LaTeX Class Files (.cls)")
+                st.markdown(
+                    "Upload custom LaTeX class files (e.g., altacv.cls) that your CV template requires. "
+                    "These files will be available in /data and the model will be aware of them."
+                )
+
+                uploaded_cls = st.file_uploader(
+                    "Upload .cls files",
+                    type=["cls"],
+                    accept_multiple_files=True,
+                    key="upload_cls",
+                    help="Upload LaTeX class files needed for your CV template",
+                )
+                if uploaded_cls:
+                    from pathlib import Path
+                    data_dir = Path("/data")
+                    for cls_file in uploaded_cls:
+                        cls_path = data_dir / cls_file.name
+                        cls_path.write_text(cls_file.read().decode("utf-8"), encoding="utf-8")
+                        st.success(f"Uploaded {cls_file.name} to /data")
+                    st.rerun()
+
             st.markdown("---")
 
             # --- Language Selection ---
@@ -1010,11 +1049,19 @@ with cv_creator_tab:
             default_prompt_key = f"cv_default_prompt::{job_url}"
             if default_prompt_key not in st.session_state:
                 st.session_state[default_prompt_key] = (
-                    "Generate a professional, one-page LaTeX CV tailored to this job profile. "
-                    "Use the provided CV skeleton structure and fill it with my most relevant "
-                    "experience, skills, and qualifications that match this specific job. "
-                    "Ensure the CV is concise, well-formatted, and highlights my strengths "
-                    "for this position. Follow professional CV best practices."
+                    "Generate a professional, one-page LaTeX CV tailored to this job profile.\n\n"
+                    "IMPORTANT: Keep the EXACT structure from the CV skeleton template. "
+                    "Only replace placeholder content in square brackets (like [YOUR NAME], [Job Title], etc.) "
+                    "with actual information from my CV that matches this job.\n\n"
+                    "Do NOT change:\n"
+                    "- The \\documentclass line\n"
+                    "- The \\usepackage commands\n"
+                    "- The overall section structure\n\n"
+                    "DO customize:\n"
+                    "- Replace all placeholder text with relevant information\n"
+                    "- Select experiences and skills that best match this job\n"
+                    "- Add appropriate bullet points highlighting my matching qualifications\n"
+                    "- Ensure everything fits on one page"
                 )
 
             with st.expander("Default Prompt (click to edit)", expanded=False):

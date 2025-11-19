@@ -562,6 +562,25 @@ def save_cv_skeleton(skeleton: str, path: Path = CV_SKELETON_PATH) -> None:
     path.write_text(skeleton, encoding="utf-8")
 
 
+def load_cls_files(data_dir: Path = DATA_DIR) -> Dict[str, str]:
+    """
+    Load all .cls files from the data directory.
+    Returns a dict mapping filename to content.
+    """
+    cls_files = {}
+    data_dir = Path(data_dir)
+    if not data_dir.exists():
+        return cls_files
+
+    for cls_path in data_dir.glob("*.cls"):
+        try:
+            cls_files[cls_path.name] = cls_path.read_text(encoding="utf-8")
+        except Exception as e:
+            cls_files[cls_path.name] = f"% ERROR reading {cls_path.name}: {e}"
+
+    return cls_files
+
+
 def load_latex_memory(path: Path = CV_LATEX_MEMORY_PATH) -> Dict[str, Any]:
     """
     Load per-job LaTeX CV chat memory from disk.
@@ -661,29 +680,45 @@ def call_latex_cv_model(
 
     cv_text = load_cv_corpus()
     job_context = build_job_context(job, "")  # No cover letter needed for CV
+    cls_files = load_cls_files()  # Load any .cls files from /data
 
     # Build the full prompt from default + user addition
     full_user_prompt = default_prompt
     if user_prompt_addition.strip():
         full_user_prompt += "\n\nAdditional instructions:\n" + user_prompt_addition
 
-    # System prompt enforcing LaTeX-only output
+    # System prompt enforcing LaTeX-only output with STRICT structure preservation
     system_content = (
         f"You are an expert LaTeX CV generator. Your task is to create a professional, "
         f"one-page CV in LaTeX based on the provided CV skeleton template.\n\n"
-        f"CRITICAL REQUIREMENTS:\n"
-        f"1. Output ONLY valid LaTeX code - no explanations, no comments, no markdown.\n"
-        f"2. The CV MUST be exactly 1 page when compiled.\n"
-        f"3. Use the CV skeleton structure provided - only modify contents, not the overall structure.\n"
-        f"4. You MAY add matching bullet points or adjust formatting to fit content.\n"
-        f"5. Follow professional CV best practices.\n"
-        f"6. Select and emphasize personal information, experience, and skills from the user's CV "
-        f"that BEST match the job profile.\n"
-        f"7. Write the entire CV in {language} language.\n"
-        f"8. Focus on relevance to the job - tailor the content to highlight the most matching qualifications.\n\n"
-        f"IMPORTANT: You can see the current editable LaTeX code. If the user asks you to modify it, "
-        f"reference that code and make the requested changes while maintaining the structure.\n\n"
-        f"OUTPUT FORMAT: Return ONLY the complete LaTeX code, nothing else."
+        f"⚠️ CRITICAL STRUCTURAL REQUIREMENTS - DO NOT VIOLATE THESE:\n"
+        f"1. PRESERVE the \\documentclass line EXACTLY as provided in the skeleton\n"
+        f"2. PRESERVE all \\usepackage commands EXACTLY as provided\n"
+        f"3. PRESERVE the overall document structure (sections, subsections, environments)\n"
+        f"4. ONLY replace placeholder text in square brackets like [YOUR NAME], [Job Title], etc.\n"
+        f"5. DO NOT add new packages unless absolutely necessary for the content\n"
+        f"6. DO NOT change the documentclass or class options\n"
+        f"7. If the skeleton uses a custom class file (e.g., altacv.cls), keep it unchanged\n\n"
+        f"✅ WHAT YOU CAN MODIFY:\n"
+        f"- Replace all placeholder content in square brackets with actual information\n"
+        f"- Add or remove bullet points within existing itemize environments\n"
+        f"- Adjust spacing slightly (\\vspace) to fit content on one page\n"
+        f"- Duplicate existing section patterns if more entries are needed (e.g., more jobs)\n\n"
+        f"📋 CONTENT REQUIREMENTS:\n"
+        f"1. Output ONLY valid LaTeX code - no explanations, no markdown code fences\n"
+        f"2. The CV MUST be exactly 1 page when compiled\n"
+        f"3. Write the entire CV in {language} language\n"
+        f"4. Select and emphasize information from the user's CV that BEST matches the job\n"
+        f"5. Follow professional CV best practices\n"
+        f"6. Tailor content to highlight the most relevant qualifications for this job\n\n"
+        f"🔧 TECHNICAL NOTES:\n"
+        f"- If .cls files are provided, they define the document class and must be referenced correctly\n"
+        f"- Maintain exact command names and environments from the skeleton\n"
+        f"- Keep the same formatting style throughout\n\n"
+        f"💡 EDITING EXISTING CVs:\n"
+        f"If you see 'Current editable LaTeX code', the user may ask you to modify it. "
+        f"When editing, maintain the EXACT structure and only change the content as requested.\n\n"
+        f"⚠️ OUTPUT FORMAT: Return ONLY the complete LaTeX code, nothing else. No explanations."
     )
 
     memory_entry = get_latex_job_memory(url)
@@ -691,20 +726,39 @@ def call_latex_cv_model(
 
     messages: List[Dict[str, str]] = [
         {"role": "system", "content": system_content},
-        {
+    ]
+
+    # Add .cls files if they exist
+    if cls_files:
+        cls_content_parts = []
+        for filename, content in cls_files.items():
+            cls_content_parts.append(f"=== {filename} ===\n{content}")
+        messages.append({
             "role": "system",
             "content": (
-                "CV Skeleton Template (use this structure):\n\n"
-                + (cv_skeleton or "(No CV skeleton provided.)")
-                + "\n\n---\n\n"
-                + "Job Profile to tailor CV for:\n\n"
-                + job_context
-                + "\n\n---\n\n"
-                + "User's CV and personal information:\n\n"
-                + (cv_text or "(No CV documents loaded.)")
+                "LaTeX Class Files (.cls) available in /data directory:\n\n"
+                + "\n\n".join(cls_content_parts)
+                + "\n\n"
+                + "IMPORTANT: If the CV skeleton uses one of these class files (e.g., \\documentclass{altacv}), "
+                + "you MUST keep the \\documentclass line exactly as specified in the skeleton. "
+                + "These class files are available and will be used during compilation."
             ),
-        },
-    ]
+        })
+
+    # Add CV skeleton, job context, and user CV
+    messages.append({
+        "role": "system",
+        "content": (
+            "CV Skeleton Template (PRESERVE THIS STRUCTURE EXACTLY):\n\n"
+            + (cv_skeleton or "(No CV skeleton provided.)")
+            + "\n\n---\n\n"
+            + "Job Profile to tailor CV for:\n\n"
+            + job_context
+            + "\n\n---\n\n"
+            + "User's CV and personal information:\n\n"
+            + (cv_text or "(No CV documents loaded.)")
+        ),
+    })
 
     # Add current editable LaTeX as context
     if editable_latex.strip():
